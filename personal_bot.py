@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import requests
 import gspread
 from google.oauth2.service_account import Credentials
 from openai import OpenAI
@@ -27,9 +28,12 @@ TABLE_NAME = os.getenv("TABLE_NAME", "Ассистент Маруфа")
 # Время Душанбе: UTC+5
 TJ_TZ = timezone(timedelta(hours=5))
 
-# Во сколько присылать утренние задачи
+# Во сколько присылать утренний отчёт
 MORNING_HOUR = int(os.getenv("MORNING_HOUR", "8"))
 MORNING_MINUTE = int(os.getenv("MORNING_MINUTE", "30"))
+
+# Модель для мотивационной речи
+MOTIVATION_MODEL = os.getenv("MOTIVATION_MODEL", "gpt-4o-mini")
 
 
 if not BOT_TOKEN:
@@ -151,33 +155,202 @@ def get_open_tasks():
     return tasks
 
 
-def format_morning_tasks():
+def format_open_tasks():
     tasks = get_open_tasks()
-    today = datetime.now(TJ_TZ).strftime("%d.%m.%Y")
 
     if not tasks:
-        return (
-            f"🌅 Доброе утро, Маруф.\n\n"
-            f"Сегодня {today}.\n\n"
-            f"Открытых задач нет.\n"
-            f"Подозрительно спокойно. Проверь, не забыли ли мы вообще жить. 😄"
-        )
+        return "✅ Открытых задач нет.\n"
 
-    answer = (
-        f"🌅 Доброе утро, Маруф.\n\n"
-        f"Сегодня {today}.\n\n"
-        f"Открытые задачи:\n\n"
-    )
+    answer = "✅ Открытые задачи:\n\n"
 
     for task in tasks:
         answer += (
             f"ID: {task.get('ID', '')}\n"
-            f"✅ {task.get('Текст', '')}\n\n"
+            f"• {task.get('Текст', '')}\n\n"
         )
 
-    answer += "Чтобы закрыть задачу, нажми ✅ Закрыть запись и введи ID."
-
+    answer += "Чтобы закрыть задачу, нажми ✅ Закрыть запись и введи ID.\n"
     return answer
+
+
+# =========================
+# ПОГОДА
+# =========================
+
+def weather_emoji(description):
+    desc = description.lower()
+
+    if "sunny" in desc or "clear" in desc:
+        return "☀️"
+    if "cloud" in desc or "overcast" in desc:
+        return "☁️"
+    if "rain" in desc or "drizzle" in desc or "shower" in desc:
+        return "🌧"
+    if "snow" in desc:
+        return "❄️"
+    if "thunder" in desc:
+        return "⛈"
+    if "mist" in desc or "fog" in desc:
+        return "🌫"
+
+    return "🌤"
+
+
+def translate_weather(description):
+    desc = description.lower()
+
+    if "sunny" in desc:
+        return "солнечно"
+    if "clear" in desc:
+        return "ясно"
+    if "partly cloudy" in desc:
+        return "переменная облачность"
+    if "cloudy" in desc:
+        return "облачно"
+    if "overcast" in desc:
+        return "пасмурно"
+    if "rain" in desc:
+        return "дождь"
+    if "drizzle" in desc:
+        return "морось"
+    if "shower" in desc:
+        return "ливень"
+    if "snow" in desc:
+        return "снег"
+    if "thunder" in desc:
+        return "гроза"
+    if "mist" in desc:
+        return "дымка"
+    if "fog" in desc:
+        return "туман"
+
+    return description
+
+
+def get_weather_for_city(city_name, city_label):
+    try:
+        url = f"https://wttr.in/{city_name}?format=j1"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        current = data["current_condition"][0]
+        today = data["weather"][0]
+        tomorrow = data["weather"][1]
+
+        current_desc = current["weatherDesc"][0]["value"]
+        today_hourly = today["hourly"][4] if len(today["hourly"]) > 4 else today["hourly"][0]
+        tomorrow_hourly = tomorrow["hourly"][4] if len(tomorrow["hourly"]) > 4 else tomorrow["hourly"][0]
+
+        today_desc = today_hourly["weatherDesc"][0]["value"]
+        tomorrow_desc = tomorrow_hourly["weatherDesc"][0]["value"]
+
+        current_text = translate_weather(current_desc)
+        today_text = translate_weather(today_desc)
+        tomorrow_text = translate_weather(tomorrow_desc)
+
+        current_icon = weather_emoji(current_desc)
+        tomorrow_icon = weather_emoji(tomorrow_desc)
+
+        return (
+            f"{city_label}:\n"
+            f"{current_icon} Сейчас: {current.get('temp_C', '?')}°C, ощущается как {current.get('FeelsLikeC', '?')}°C, {current_text}\n"
+            f"📌 Сегодня: {today.get('mintempC', '?')}…{today.get('maxtempC', '?')}°C, {today_text}\n"
+            f"{tomorrow_icon} Завтра: {tomorrow.get('mintempC', '?')}…{tomorrow.get('maxtempC', '?')}°C, {tomorrow_text}\n"
+        )
+
+    except Exception as e:
+        return (
+            f"{city_label}:\n"
+            f"⚠️ Не смог получить погоду. Ошибка: {e}\n"
+        )
+
+
+def format_weather_block():
+    dushanbe = get_weather_for_city("Dushanbe", "Душанбе")
+    khujand = get_weather_for_city("Khujand", "Худжанд")
+
+    return (
+        "🌤 Погода сегодня и завтра:\n\n"
+        f"{dushanbe}\n"
+        f"{khujand}"
+    )
+
+
+# =========================
+# МОТИВАЦИЯ
+# =========================
+
+def generate_motivation():
+    today = datetime.now(TJ_TZ).strftime("%d.%m.%Y")
+
+    prompt = f"""
+Напиши короткую утреннюю мотивационную речь для Маруфа на русском языке.
+
+Контекст:
+- Маруф строит мебельное производство «Чинор».
+- У него есть шоурум, цех, операторы распила, кромки, присадки.
+- Его цель — построить систему, порядок, ответственность и стабильный бизнес.
+- Стиль: по-мужски, спокойно, без пафоса, без банальных цитат.
+- 5–7 строк.
+- Каждый день формулируй по-новому.
+- Дата сегодня: {today}.
+- Не используй длинные вступления.
+- Не пиши “дорогой Маруф”.
+"""
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=MOTIVATION_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Ты пишешь короткие, сильные утренние речи для предпринимателя. Без воды, без пафоса."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.9,
+            max_tokens=220
+        )
+
+        text = response.choices[0].message.content.strip()
+        return f"🔥 Речь дня:\n\n{text}"
+
+    except Exception as e:
+        return (
+            "🔥 Речь дня:\n\n"
+            "Сегодня не жди идеального настроения. Начни с одной ясной задачи, наведи порядок в одном месте, закрой один хвост. "
+            "Система строится не вдохновением, а повторением.\n\n"
+            f"⚠️ Мотивацию от ИИ не удалось получить: {e}"
+        )
+
+
+# =========================
+# УТРЕННИЙ ОТЧЁТ
+# =========================
+
+def format_morning_report():
+    today = datetime.now(TJ_TZ).strftime("%d.%m.%Y")
+
+    weather_block = format_weather_block()
+    tasks_block = format_open_tasks()
+    motivation_block = generate_motivation()
+
+    return (
+        f"🌅 Доброе утро, Маруф.\n\n"
+        f"Сегодня {today}.\n\n"
+        f"{weather_block}\n"
+        f"{tasks_block}\n"
+        f"{motivation_block}"
+    )
+
+
+# Старое имя функции оставляем, чтобы кнопка и команда работали без сюрпризов
+def format_morning_tasks():
+    return format_morning_report()
 
 
 # =========================
@@ -214,13 +387,13 @@ async def morning_scheduler():
             try:
                 await bot.send_message(
                     chat_id=MORNING_CHAT_ID,
-                    text=format_morning_tasks(),
+                    text=format_morning_report(),
                     reply_markup=keyboard
                 )
                 last_sent_date = today
-                print(f"Утренние задачи отправлены: {today}")
+                print(f"Утренний отчёт отправлен: {today}")
             except Exception as e:
-                print(f"Ошибка отправки утренних задач: {e}")
+                print(f"Ошибка отправки утреннего отчёта: {e}")
 
         await asyncio.sleep(30)
 
@@ -249,7 +422,7 @@ async def myid(message: types.Message):
 @dp.message(Command("morning"))
 async def morning_command(message: types.Message):
     await message.answer(
-        format_morning_tasks(),
+        format_morning_report(),
         reply_markup=keyboard
     )
 
@@ -350,7 +523,7 @@ async def handle_text(message: types.Message):
 
     if text == "🌅 Утренние задачи":
         await message.answer(
-            format_morning_tasks(),
+            format_morning_report(),
             reply_markup=keyboard
         )
         return

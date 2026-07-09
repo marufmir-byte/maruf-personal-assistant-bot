@@ -1,10 +1,12 @@
 import asyncio
 import os
 import json
+import random
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import requests
+import feedparser
 import gspread
 from google.oauth2.service_account import Credentials
 from openai import OpenAI
@@ -34,6 +36,30 @@ MORNING_MINUTE = int(os.getenv("MORNING_MINUTE", "30"))
 
 # Модель для мотивационной речи
 MOTIVATION_MODEL = os.getenv("MOTIVATION_MODEL", "gpt-4o-mini")
+
+AI_RSS_FEEDS = [
+    "https://openai.com/news/rss.xml",
+    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
+    "https://techcrunch.com/category/artificial-intelligence/feed/",
+    "https://venturebeat.com/category/ai/feed/",
+    "https://www.artificialintelligence-news.com/feed/",
+]
+
+DAY_CARDS = [
+    "Сегодня не туши все пожары сам. Найди один повторяющийся пожар и сделай правило.",
+    "Один хороший чек-лист сегодня сэкономит один конфликт завтра. Скучно, зато работает.",
+    "Выбери одну задачу, которая двигает систему, а не просто создаёт видимость занятости.",
+    "Проверь слабое место: где заказ может застрять между распилом, кромкой и присадкой.",
+    "Сегодня разговаривай цифрами: срок, сумма, количество, ошибка. Мнения оставим для семейных застолий.",
+    "Не улучшай всё сразу. Улучши один процесс на 1%, чтобы завтра не начинать опять с нуля.",
+]
+
+FOCUS_LIST = [
+    "Порядок в задачах и контроль передачи между людьми.",
+    "Меньше ручного управления, больше понятных правил.",
+    "Деньги, сроки, качество. Остальное красиво шумит на фоне.",
+    "Найти одну ошибку в процессе до того, как её найдёт клиент.",
+]
 
 
 if not BOT_TOKEN:
@@ -278,6 +304,93 @@ def format_weather_block():
 
 
 # =========================
+# НОВОСТИ ИИ
+# =========================
+
+def clean_text(text):
+    return " ".join(str(text or "").replace("\n", " ").split())
+
+
+def get_ai_news(limit=3):
+    items = []
+    seen = set()
+
+    for feed_url in AI_RSS_FEEDS:
+        try:
+            feed = feedparser.parse(feed_url)
+            source = clean_text(feed.feed.get("title", "AI news"))
+
+            for entry in feed.entries[:8]:
+                title = clean_text(entry.get("title", ""))
+                link = clean_text(entry.get("link", ""))
+
+                if not title:
+                    continue
+
+                key = title.lower()
+                if key in seen:
+                    continue
+
+                seen.add(key)
+                items.append({
+                    "title": title,
+                    "link": link,
+                    "source": source,
+                })
+        except Exception:
+            continue
+
+    hot_words = [
+        "openai", "chatgpt", "gpt", "claude", "anthropic",
+        "google", "gemini", "agent", "agents", "video", "image",
+        "runway", "midjourney", "sora", "elevenlabs"
+    ]
+
+    def score(item):
+        title = item["title"].lower()
+        return sum(2 for word in hot_words if word in title)
+
+    items.sort(key=score, reverse=True)
+    return items[:limit]
+
+
+def format_ai_news_block():
+    news = get_ai_news(3)
+
+    if not news:
+        return (
+            "🤖 ИИ за ночь:\n\n"
+            "Новости ИИ не загрузились. Возможно, интернет решил, что человечество уже достаточно напугало себя нейросетями.\n"
+        )
+
+    answer = "🤖 ИИ за ночь:\n\n"
+
+    for i, item in enumerate(news, start=1):
+        answer += (
+            f"{i}. {item['title']}\n"
+            f"Источник: {item['source']}\n"
+        )
+        if item["link"]:
+            answer += f"Ссылка: {item['link']}\n"
+        answer += "\n"
+
+    answer += (
+        "🛠 Что проверить тебе:\n"
+        "Если среди новостей есть инструмент для видео, изображений, озвучки или автоматизации, выдели 20 минут на тест. "
+        "Не покупать сразу, не влюбляться в красивую кнопку, просто проверить пользу.\n"
+    )
+    return answer
+
+
+def format_focus_block():
+    return f"🎯 Фокус дня:\n\n{random.choice(FOCUS_LIST)}\n"
+
+
+def format_day_card_block():
+    return f"🎲 Карточка дня:\n\n{random.choice(DAY_CARDS)}\n"
+
+
+# =========================
 # МОТИВАЦИЯ
 # =========================
 
@@ -337,6 +450,9 @@ def format_morning_report():
 
     weather_block = format_weather_block()
     tasks_block = format_open_tasks()
+    ai_news_block = format_ai_news_block()
+    focus_block = format_focus_block()
+    day_card_block = format_day_card_block()
     motivation_block = generate_motivation()
 
     return (
@@ -344,6 +460,9 @@ def format_morning_report():
         f"Сегодня {today}.\n\n"
         f"{weather_block}\n"
         f"{tasks_block}\n"
+        f"{ai_news_block}\n"
+        f"{focus_block}\n"
+        f"{day_card_block}\n"
         f"{motivation_block}"
     )
 

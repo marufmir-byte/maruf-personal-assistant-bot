@@ -3,3 +3,4 @@ gspread
 google-auth
 openai
 requests
+feedparser==6.0.11

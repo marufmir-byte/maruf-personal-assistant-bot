@@ -15,6 +15,8 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
+from digest_engine import generate_personal_digest
+
 
 # =========================
 # НАСТРОЙКИ ЧЕРЕЗ ПЕРЕМЕННЫЕ
@@ -185,18 +187,20 @@ def format_open_tasks():
     tasks = get_open_tasks()
 
     if not tasks:
-        return "✅ Открытых задач нет.\n"
+        return "✅ Открытых задач нет."
 
     answer = "✅ Открытые задачи:\n\n"
 
-    for task in tasks:
+    for task in tasks[:8]:
         answer += (
             f"ID: {task.get('ID', '')}\n"
             f"• {task.get('Текст', '')}\n\n"
         )
 
-    answer += "Чтобы закрыть задачу, нажми ✅ Закрыть запись и введи ID.\n"
-    return answer
+    if len(tasks) > 8:
+        answer += f"Ещё открытых задач: {len(tasks) - 8}\n"
+
+    return answer.strip()
 
 
 # =========================
@@ -323,6 +327,7 @@ def get_ai_news(limit=3):
             for entry in feed.entries[:8]:
                 title = clean_text(entry.get("title", ""))
                 link = clean_text(entry.get("link", ""))
+                summary = clean_text(entry.get("summary", ""))[:350]
 
                 if not title:
                     continue
@@ -336,6 +341,7 @@ def get_ai_news(limit=3):
                     "title": title,
                     "link": link,
                     "source": source,
+                    "summary": summary,
                 })
         except Exception:
             continue
@@ -343,7 +349,7 @@ def get_ai_news(limit=3):
     hot_words = [
         "openai", "chatgpt", "gpt", "claude", "anthropic",
         "google", "gemini", "agent", "agents", "video", "image",
-        "runway", "midjourney", "sora", "elevenlabs"
+        "runway", "midjourney", "sora", "elevenlabs", "codex"
     ]
 
     def score(item):
@@ -354,9 +360,7 @@ def get_ai_news(limit=3):
     return items[:limit]
 
 
-def format_ai_news_block():
-    news = get_ai_news(3)
-
+def format_ai_news_fallback(news):
     if not news:
         return (
             "🤖 ИИ за ночь:\n\n"
@@ -368,18 +372,12 @@ def format_ai_news_block():
     for i, item in enumerate(news, start=1):
         answer += (
             f"{i}. {item['title']}\n"
-            f"Источник: {item['source']}\n"
+            f"Почему важно: это показывает, куда движутся инструменты, автоматизация и работа с файлами.\n"
+            f"Что сделать тебе: подумать, можно ли применить это для Чинор, контента или личного ассистента.\n"
+            f"Источник: {item['source']}\n\n"
         )
-        if item["link"]:
-            answer += f"Ссылка: {item['link']}\n"
-        answer += "\n"
 
-    answer += (
-        "🛠 Что проверить тебе:\n"
-        "Если среди новостей есть инструмент для видео, изображений, озвучки или автоматизации, выдели 20 минут на тест. "
-        "Не покупать сразу, не влюбляться в красивую кнопку, просто проверить пользу.\n"
-    )
-    return answer
+    return answer.strip()
 
 
 def format_focus_block():
@@ -450,20 +448,15 @@ def format_morning_report():
 
     weather_block = format_weather_block()
     tasks_block = format_open_tasks()
-    ai_news_block = format_ai_news_block()
-    focus_block = format_focus_block()
-    day_card_block = format_day_card_block()
-    motivation_block = generate_motivation()
+    news = get_ai_news(3)
 
-    return (
-        f"🌅 Доброе утро, Маруф.\n\n"
-        f"Сегодня {today}.\n\n"
-        f"{weather_block}\n"
-        f"{tasks_block}\n"
-        f"{ai_news_block}\n"
-        f"{focus_block}\n"
-        f"{day_card_block}\n"
-        f"{motivation_block}"
+    return generate_personal_digest(
+        openai_client=openai_client,
+        model=MOTIVATION_MODEL,
+        today=today,
+        weather_block=weather_block,
+        tasks_block=tasks_block,
+        news=news,
     )
 
 

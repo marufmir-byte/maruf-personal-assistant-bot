@@ -13,7 +13,7 @@ from openai import OpenAI
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 
 from digest_engine import generate_personal_digest
 
@@ -36,8 +36,13 @@ TJ_TZ = timezone(timedelta(hours=5))
 MORNING_HOUR = int(os.getenv("MORNING_HOUR", "8"))
 MORNING_MINUTE = int(os.getenv("MORNING_MINUTE", "30"))
 
-# Модель для мотивационной речи
+# Модель для утреннего дайджеста
 MOTIVATION_MODEL = os.getenv("MOTIVATION_MODEL", "gpt-4o-mini")
+
+# Голосовая версия утреннего дайджеста
+SEND_MORNING_VOICE = os.getenv("SEND_MORNING_VOICE", "true").lower() in ["1", "true", "yes", "да"]
+TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
+TTS_VOICE = os.getenv("TTS_VOICE", "alloy")
 
 AI_RSS_FEEDS = [
     "https://openai.com/news/rss.xml",
@@ -389,57 +394,6 @@ def format_day_card_block():
 
 
 # =========================
-# МОТИВАЦИЯ
-# =========================
-
-def generate_motivation():
-    today = datetime.now(TJ_TZ).strftime("%d.%m.%Y")
-
-    prompt = f"""
-Напиши короткую утреннюю мотивационную речь для Маруфа на русском языке.
-
-Контекст:
-- Маруф строит мебельное производство «Чинор».
-- У него есть шоурум, цех, операторы распила, кромки, присадки.
-- Его цель — построить систему, порядок, ответственность и стабильный бизнес.
-- Стиль: по-мужски, спокойно, без пафоса, без банальных цитат.
-- 5–7 строк.
-- Каждый день формулируй по-новому.
-- Дата сегодня: {today}.
-- Не используй длинные вступления.
-- Не пиши “дорогой Маруф”.
-"""
-
-    try:
-        response = openai_client.chat.completions.create(
-            model=MOTIVATION_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Ты пишешь короткие, сильные утренние речи для предпринимателя. Без воды, без пафоса."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.9,
-            max_tokens=220
-        )
-
-        text = response.choices[0].message.content.strip()
-        return f"🔥 Речь дня:\n\n{text}"
-
-    except Exception as e:
-        return (
-            "🔥 Речь дня:\n\n"
-            "Сегодня не жди идеального настроения. Начни с одной ясной задачи, наведи порядок в одном месте, закрой один хвост. "
-            "Система строится не вдохновением, а повторением.\n\n"
-            f"⚠️ Мотивацию от ИИ не удалось получить: {e}"
-        )
-
-
-# =========================
 # УТРЕННИЙ ОТЧЁТ
 # =========================
 
@@ -480,6 +434,85 @@ def transcribe_audio(file_path):
     return transcription.text
 
 
+def generate_voice_summary(report_text):
+    prompt = f"""
+Сделай короткую голосовую версию утреннего дайджеста для Маруфа.
+
+Правила:
+- 45-60 секунд чтения.
+- Русский язык.
+- Без ссылок.
+- Без приветствий типа 'удачного дня'.
+- Скажи только самое важное: погода/риск, главное действие, 1 новость ИИ, идея для Чинор.
+- Стиль: спокойный личный операционный советник.
+
+Исходный дайджест:
+{report_text[:3500]}
+"""
+    try:
+        response = openai_client.chat.completions.create(
+            model=MOTIVATION_MODEL,
+            messages=[
+                {"role": "system", "content": "Ты сжимаешь длинный утренний дайджест в короткое голосовое резюме."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.5,
+            max_tokens=350,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return report_text[:900]
+
+
+def text_to_voice_file(text, filename="morning_voice.ogg"):
+    voices_dir = Path("voices")
+    voices_dir.mkdir(exist_ok=True)
+    file_path = voices_dir / filename
+
+    response = requests.post(
+        "https://api.openai.com/v1/audio/speech",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": TTS_MODEL,
+            "voice": TTS_VOICE,
+            "input": text[:3000],
+            "response_format": "opus",
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+
+    with open(file_path, "wb") as audio_file:
+        audio_file.write(response.content)
+
+    return file_path
+
+
+async def send_morning_report(chat_id):
+    report = format_morning_report()
+    await bot.send_message(chat_id=chat_id, text=report, reply_markup=keyboard)
+
+    if not SEND_MORNING_VOICE:
+        return
+
+    voice_path = None
+    try:
+        summary = generate_voice_summary(report)
+        voice_path = text_to_voice_file(summary, f"morning_voice_{chat_id}.ogg")
+        await bot.send_voice(chat_id=chat_id, voice=FSInputFile(voice_path), reply_markup=keyboard)
+    except Exception as e:
+        print(f"Ошибка отправки голосового утреннего отчёта: {e}")
+    finally:
+        if voice_path:
+            try:
+                voice_path.unlink()
+            except Exception:
+                pass
+
+
 # =========================
 # УТРЕННИЙ ПЛАНИРОВЩИК
 # =========================
@@ -497,11 +530,7 @@ async def morning_scheduler():
             and last_sent_date != today
         ):
             try:
-                await bot.send_message(
-                    chat_id=MORNING_CHAT_ID,
-                    text=format_morning_report(),
-                    reply_markup=keyboard
-                )
+                await send_morning_report(MORNING_CHAT_ID)
                 last_sent_date = today
                 print(f"Утренний отчёт отправлен: {today}")
             except Exception as e:
@@ -533,10 +562,7 @@ async def myid(message: types.Message):
 
 @dp.message(Command("morning"))
 async def morning_command(message: types.Message):
-    await message.answer(
-        format_morning_report(),
-        reply_markup=keyboard
-    )
+    await send_morning_report(message.chat.id)
 
 
 # =========================
@@ -634,10 +660,7 @@ async def handle_text(message: types.Message):
         return
 
     if text == "🌅 Утренние задачи":
-        await message.answer(
-            format_morning_report(),
-            reply_markup=keyboard
-        )
+        await send_morning_report(message.chat.id)
         return
 
     if text in ["📋 Последние записи", "📋 Показать записи"]:

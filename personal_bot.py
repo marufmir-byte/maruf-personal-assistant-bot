@@ -324,45 +324,120 @@ def get_ai_news(limit=3):
     items = []
     seen = set()
 
+    now = datetime.now(timezone.utc)
+    max_news_age = timedelta(days=3)
+
     for feed_url in AI_RSS_FEEDS:
         try:
             feed = feedparser.parse(feed_url)
-            source = clean_text(feed.feed.get("title", "AI news"))
+            source = clean_text(feed.feed.get("title", "Новости ИИ"))
 
-            for entry in feed.entries[:8]:
+            for entry in feed.entries[:15]:
                 title = clean_text(entry.get("title", ""))
                 link = clean_text(entry.get("link", ""))
                 summary = clean_text(entry.get("summary", ""))[:350]
 
-                if not title:
+                if not title or not link:
                     continue
 
-                key = title.lower()
+                published_struct = (
+                    entry.get("published_parsed")
+                    or entry.get("updated_parsed")
+                    or entry.get("created_parsed")
+                )
+
+                if not published_struct:
+                    continue
+
+                try:
+                    published_at = datetime(
+                        published_struct.tm_year,
+                        published_struct.tm_mon,
+                        published_struct.tm_mday,
+                        published_struct.tm_hour,
+                        published_struct.tm_min,
+                        published_struct.tm_sec,
+                        tzinfo=timezone.utc,
+                    )
+                except Exception:
+                    continue
+
+                age = now - published_at
+
+                if age < timedelta(0) or age > max_news_age:
+                    continue
+
+                key = link.lower()
+
                 if key in seen:
                     continue
 
                 seen.add(key)
+
                 items.append({
                     "title": title,
                     "link": link,
                     "source": source,
                     "summary": summary,
+                    "published_at": published_at,
                 })
-        except Exception:
+
+        except Exception as error:
+            print(f"Ошибка загрузки RSS {feed_url}: {error}")
             continue
 
     hot_words = [
-        "openai", "chatgpt", "gpt", "claude", "anthropic",
-        "google", "gemini", "agent", "agents", "video", "image",
-        "runway", "midjourney", "sora", "elevenlabs", "codex"
+        "openai",
+        "chatgpt",
+        "gpt",
+        "claude",
+        "anthropic",
+        "google",
+        "gemini",
+        "agent",
+        "agents",
+        "video",
+        "image",
+        "runway",
+        "midjourney",
+        "sora",
+        "elevenlabs",
+        "codex",
+        "automation",
+        "business",
     ]
 
     def score(item):
         title = item["title"].lower()
-        return sum(2 for word in hot_words if word in title)
+        relevance = sum(2 for word in hot_words if word in title)
 
-    items.sort(key=score, reverse=True)
-    return items[:limit]
+        age_hours = (
+            now - item["published_at"]
+        ).total_seconds() / 3600
+
+        freshness = max(0, 72 - age_hours) / 24
+
+        return relevance + freshness
+
+    items.sort(
+        key=lambda item: (
+            score(item),
+            item["published_at"],
+        ),
+        reverse=True,
+    )
+
+    result = []
+
+    for item in items[:limit]:
+        result.append({
+            "title": item["title"],
+            "link": item["link"],
+            "source": item["source"],
+            "summary": item["summary"],
+        })
+
+    return result
 
 
 def format_ai_news_fallback(news):
